@@ -8,15 +8,10 @@ from random import shuffle as unsort
 from time import strftime
 
 import click
-import ytmusicapi.exceptions
 from click import get_current_context
+from ytmusic_deleter import common
 from ytmusic_deleter._version import __version__
 from ytmusic_deleter.auth import ensure_auth
-from ytmusic_deleter.common import can_edit_playlist
-from ytmusic_deleter.common import INDIFFERENT
-from ytmusic_deleter.common import search_string_in_dict
-from ytmusic_deleter.common import SORTABLE_ATTRIBUTES
-from ytmusic_deleter.common import UNKNOWN_ARTIST
 from ytmusic_deleter.duplicates import check_for_duplicates
 from ytmusic_deleter.duplicates import determine_tracks_to_remove
 from ytmusic_deleter.progress import manager
@@ -170,7 +165,7 @@ def remove_library_podcasts():
         if not id:
             logging.debug(f"\tCan't delete podcast {title!r} because it doesn't have an ID.")
             continue
-        response = yt_auth.rate_playlist(id, INDIFFERENT)
+        response = yt_auth.rate_playlist(id, common.INDIFFERENT)
         if "actions" in response:
             logging.info(f"\tRemoved {title!r} from your library.")
             podcasts_removed += 1
@@ -186,25 +181,38 @@ def remove_library_items(library_items):
     items_removed = 0
     for item in library_items:
         logging.debug(f"Full album or song item: {item}")
-        artist = item["artists"][0]["name"] if "artists" in item else UNKNOWN_ARTIST
+        artist = item["artists"][0]["name"] if "artists" in item else common.UNKNOWN_ARTIST
         title = item.get("title")
         logging.info(f"Processing item: {artist} - {title!r}")
 
         id = item.get("playlistId")
         if id:
             logging.debug(f"Removing album using id: {id}")
-            response = yt_auth.rate_playlist(id, INDIFFERENT)
+            response = yt_auth.rate_playlist(id, common.INDIFFERENT)
         elif item.get("feedbackTokens") and isinstance(item.get("feedbackTokens"), dict):
-            logging.debug("This is a song, removing item using feedbackTokens")
-            remove_token = item.get("feedbackTokens").get("remove")
-            try:
-                response = yt_auth.edit_song_library_status([remove_token])
-            except ytmusicapi.exceptions.YTMusicServerError:
-                response = None
-                logging.error(
-                    "Error: There is currently an issue with removing individual songs that are not part of an album. "
-                    "See https://github.com/apastel/ytmusic-deleter/issues/108"
-                )
+            logging.debug("This is a song, removing item by removing containing album.")
+            album_browse_id = item["album"]["id"]
+            library_album = yt_auth.get_album(album_browse_id)
+            audio_playlist_id = library_album["audioPlaylistId"]
+            if not audio_playlist_id:
+                # Monkey patch until https://github.com/sigma67/ytmusicapi/issues/743 is fixed.
+                import ytmusicapi.mixins.browsing
+
+                ytmusicapi.mixins.browsing.parse_album_header_2024 = common.parse_album_header_2025
+
+                library_album = yt_auth.get_album(album_browse_id)
+                audio_playlist_id = library_album["audioPlaylistId"]
+                if not audio_playlist_id:
+                    response = None
+                    logging.debug("Moneky patch did not work :/")
+                    logging.error(
+                        "Error: There is currently an issue with removing individual songs that are not part of an album. "
+                        "See https://github.com/apastel/ytmusic-deleter/issues/108"
+                    )
+                else:
+                    response = yt_auth.rate_playlist(audio_playlist_id, common.INDIFFERENT)
+            else:
+                response = yt_auth.rate_playlist(audio_playlist_id, common.INDIFFERENT)
         else:
             logging.error(
                 f"""
@@ -250,19 +258,19 @@ def unlike_all(ctx: click.Context):
         artist = (
             track["artists"][0]["name"]
             if track.get("artists")  # Using `get` ensures key exists and isn't []
-            else UNKNOWN_ARTIST
+            else common.UNKNOWN_ARTIST
         )
         title = track["title"]
         logging.info(f"Processing track: {artist} - {title!r}")
         try:
-            response = yt_auth.rate_song(track["videoId"], INDIFFERENT)
+            response = yt_auth.rate_song(track["videoId"], common.INDIFFERENT)
             num_retries = 100
             while num_retries > 0 and (
-                not search_string_in_dict(response, "Removed from liked music")
-                or not search_string_in_dict(response, "consistencyTokenJar")
+                not common.search_string_in_dict(response, "Removed from liked music")
+                or not common.search_string_in_dict(response, "consistencyTokenJar")
             ):
                 logging.info("\tRetrying track...")
-                response = yt_auth.rate_song(track["videoId"], INDIFFERENT)
+                response = yt_auth.rate_song(track["videoId"], common.INDIFFERENT)
                 num_retries -= 1
             logging.info("\tRemoved track from Likes.")
             songs_unliked += 1
@@ -342,7 +350,7 @@ def delete_history(ctx: click.Context, items_deleted: int = 0):
         artist = (
             item["artists"][0]["name"]
             if item.get("artists")  # Using `get` ensures key exists and isn't []
-            else UNKNOWN_ARTIST
+            else common.UNKNOWN_ARTIST
         )
         logging.info(f"\tProcessing history item: {artist} - {item['title']!r}")
         response = yt_auth.remove_history_items(item["feedbackToken"])
@@ -376,7 +384,7 @@ def delete_all(ctx: click.Context):
 @click.pass_context
 def sort_playlist(ctx: click.Context, shuffle, playlist_titles, custom_sort, reverse):
     """Sort or shuffle one or more playlists alphabetically by artist and by album"""
-    invalid_keys = [attr for attr in custom_sort if attr not in SORTABLE_ATTRIBUTES]
+    invalid_keys = [attr for attr in custom_sort if attr not in common.SORTABLE_ATTRIBUTES]
     if invalid_keys:
         raise ValueError(f"Invalid sort option(s): {', '.join(invalid_keys)}")
 
@@ -389,7 +397,7 @@ def sort_playlist(ctx: click.Context, shuffle, playlist_titles, custom_sort, rev
     for selected_playlist in selected_playlist_list:
         logging.info(f'Processing playlist: {selected_playlist["title"]}')
         playlist = yt_auth.get_playlist(selected_playlist["playlistId"], limit=None)
-        if not can_edit_playlist(playlist):
+        if not common.can_edit_playlist(playlist):
             logging.error(f"Cannot modify playlist {playlist.get('title')!r}. You are not the owner of this playlist.")
             continue
         current_tracklist = [t for t in playlist["tracks"]]
@@ -413,8 +421,8 @@ def sort_playlist(ctx: click.Context, shuffle, playlist_titles, custom_sort, rev
             cur_idx = desired_tracklist.index(cur_track)
             track_after = current_tracklist[cur_idx]
 
-            cur_artist = cur_track["artists"][0]["name"] if cur_track["artists"] else UNKNOWN_ARTIST
-            track_after_artist = track_after["artists"][0]["name"] if track_after["artists"] else UNKNOWN_ARTIST
+            cur_artist = cur_track["artists"][0]["name"] if cur_track["artists"] else common.UNKNOWN_ARTIST
+            track_after_artist = track_after["artists"][0]["name"] if track_after["artists"] else common.UNKNOWN_ARTIST
             if cur_track != track_after:
                 logging.debug(
                     f"Moving {cur_artist} - {cur_track['title']!r} before {track_after_artist} - {track_after['title']!r}"
@@ -502,7 +510,7 @@ def remove_duplicates(ctx: click.Context, playlist_title, exact):
     playlist_id = playlist.get("id")
     if playlist_id == "LM":
         for song in items_to_remove:
-            yt_auth.rate_song(song["videoId"], INDIFFERENT)
+            yt_auth.rate_song(song["videoId"], common.INDIFFERENT)
     else:
         yt_auth.remove_playlist_items(playlist_id, items_to_remove)
     logging.info("Finished removing duplicate tracks.")
@@ -573,7 +581,7 @@ def get_playlist_from_title(yt_auth: YTMusic, playlist_title: str) -> dict:
     playlist: dict = yt_auth.get_playlist(selected_playlist_id, limit=None)
     playlist_title_formatted = playlist.get("title")
     logging.info(f"Retrieved playlist named {playlist_title_formatted!r} with {len(playlist.get('tracks'))} tracks.")
-    if not can_edit_playlist(playlist):
+    if not common.can_edit_playlist(playlist):
         raise click.BadParameter(
             f"Cannot modify playlist {playlist_title_formatted!r}. You are not the owner of this playlist."
         )
